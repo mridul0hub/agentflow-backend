@@ -6,3 +6,4 @@ langchain-core
 twilio
 pydantic
 supabase
+python-multipart
