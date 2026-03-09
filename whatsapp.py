@@ -114,7 +114,7 @@ def save_message(business_number: str, customer_number: str, role: str, message:
             "message": message
         }).execute()
 
-        print(f"💾 Saved [{role}]: {message[:50]}...")
+        print(f"💾 Saved [{role}]: {message[:50]}")
 
     except Exception as e:
         print(f"❌ Save message error: {e}")
@@ -151,30 +151,20 @@ def load_chat_history(business_number: str, customer_number: str) -> list:
         return []
 
 # ─────────────────────────────────────────
-# Get AI response
+# Get AI response (NO saving here)
 # ─────────────────────────────────────────
 def get_ai_response(customer_number: str, business_number: str, message: str) -> str:
-    # Fetch config
     config = get_agent_config(business_number)
     system_prompt = build_system_prompt(config)
 
-    # Load history from Supabase
     history = load_chat_history(business_number, customer_number)
 
-    # Build messages
     messages = [SystemMessage(content=system_prompt)]
     messages.extend(history)
     messages.append(HumanMessage(content=message))
 
-    # Get AI reply
     response = llm.invoke(messages)
-    ai_reply = response.content
-
-    # Save both messages to Supabase
-    save_message(business_number, customer_number, "user", message)
-    save_message(business_number, customer_number, "assistant", ai_reply)
-
-    return ai_reply
+    return response.content
 
 # ─────────────────────────────────────────
 # WhatsApp webhook
@@ -195,9 +185,17 @@ async def whatsapp_message(request: Request):
         return Response(content="", media_type="text/plain")
 
     try:
+        # Step 1 — Save user message FIRST
+        save_message(business_number, customer_number, "user", incoming_message)
+
+        # Step 2 — Get AI reply
         ai_reply = get_ai_response(customer_number, business_number, incoming_message)
         print(f"🤖 AI Reply: {ai_reply}")
 
+        # Step 3 — Save assistant reply AFTER
+        save_message(business_number, customer_number, "assistant", ai_reply)
+
+        # Step 4 — Send reply to customer
         twilio_client.messages.create(
             body=ai_reply,
             from_=business_number,
