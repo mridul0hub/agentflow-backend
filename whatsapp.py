@@ -1,7 +1,8 @@
 import os
+import json
+import httpx
 from dotenv import load_dotenv
 from fastapi import APIRouter, Request, Response
-from twilio.rest import Client
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from supabase import create_client
@@ -9,12 +10,6 @@ from supabase import create_client
 load_dotenv(dotenv_path="D:/AI_Agent_SaaS/.env")
 
 router = APIRouter()
-
-# Twilio
-twilio_client = Client(
-    os.getenv("TWILIO_ACCOUNT_SID"),
-    os.getenv("TWILIO_AUTH_TOKEN")
-)
 
 # Gemini AI
 llm = ChatGoogleGenerativeAI(
@@ -29,17 +24,40 @@ supabase = create_client(
     os.getenv("SUPABASE_SERVICE_KEY")
 )
 
+# Meta credentials
+META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
+META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "vasuagents2024")
+
+# ─────────────────────────────────────────
+# Webhook Verification (GET)
+# Meta calls this once to verify webhook
+# ─────────────────────────────────────────
+@router.get("/message")
+async def verify_webhook(request: Request):
+    params = dict(request.query_params)
+    mode      = params.get("hub.mode")
+    token     = params.get("hub.verify_token")
+    challenge = params.get("hub.challenge")
+
+    print(f"🔔 Webhook verify: mode={mode}, token={token}")
+
+    if mode == "subscribe" and token == META_VERIFY_TOKEN:
+        print("✅ Webhook verified!")
+        return Response(content=challenge, media_type="text/plain")
+    else:
+        print("❌ Webhook verification failed!")
+        return Response(content="Forbidden", status_code=403)
+
 # ─────────────────────────────────────────
 # Fetch agent config from Supabase
 # ─────────────────────────────────────────
-def get_agent_config(whatsapp_number: str):
+def get_agent_config(phone_number_id: str):
     try:
-        clean_number = whatsapp_number.replace("whatsapp:", "").strip()
-        print(f"🔍 Looking up config for: {clean_number}")
+        print(f"🔍 Looking up config for phone_number_id: {phone_number_id}")
 
         result = supabase.table("whatsapp_agents") \
             .select("*") \
-            .eq("whatsapp_number", clean_number) \
+            .eq("phone_number_id", phone_number_id) \
             .eq("is_active", True) \
             .single() \
             .execute()
@@ -48,7 +66,7 @@ def get_agent_config(whatsapp_number: str):
             print(f"✅ Config found: {result.data['business_name']}")
             return result.data
         else:
-            print(f"⚠️ No active agent for: {clean_number}")
+            print(f"⚠️ No active agent for phone_number_id: {phone_number_id}")
             return None
 
     except Exception as e:
@@ -104,18 +122,13 @@ INSTRUCTIONS:
 # ─────────────────────────────────────────
 def save_message(business_number: str, customer_number: str, role: str, message: str):
     try:
-        clean_business = business_number.replace("whatsapp:", "").strip()
-        clean_customer = customer_number.replace("whatsapp:", "").strip()
-
         supabase.table("chat_history").insert({
-            "business_number": clean_business,
-            "customer_number": clean_customer,
+            "business_number": business_number,
+            "customer_number": customer_number,
             "role": role,
             "message": message
         }).execute()
-
         print(f"💾 Saved [{role}]: {message[:50]}")
-
     except Exception as e:
         print(f"❌ Save message error: {e}")
 
@@ -124,13 +137,10 @@ def save_message(business_number: str, customer_number: str, role: str, message:
 # ─────────────────────────────────────────
 def load_chat_history(business_number: str, customer_number: str) -> list:
     try:
-        clean_business = business_number.replace("whatsapp:", "").strip()
-        clean_customer = customer_number.replace("whatsapp:", "").strip()
-
         result = supabase.table("chat_history") \
             .select("role, message") \
-            .eq("business_number", clean_business) \
-            .eq("customer_number", clean_customer) \
+            .eq("business_number", business_number) \
+            .eq("customer_number", customer_number) \
             .order("created_at", desc=False) \
             .limit(20) \
             .execute()
@@ -151,10 +161,30 @@ def load_chat_history(business_number: str, customer_number: str) -> list:
         return []
 
 # ─────────────────────────────────────────
-# Get AI response (NO saving here)
+# Send reply via Meta Cloud API
 # ─────────────────────────────────────────
-def get_ai_response(customer_number: str, business_number: str, message: str) -> str:
-    config = get_agent_config(business_number)
+async def send_meta_message(phone_number_id: str, to: str, message: str, access_token: str):
+    url = f"https://graph.facebook.com/v22.0/{phone_number_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": message}
+    }
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, headers=headers, json=payload)
+        print(f"📤 Meta API response: {response.status_code} - {response.text}")
+        return response
+
+# ─────────────────────────────────────────
+# Get AI response
+# ─────────────────────────────────────────
+def get_ai_response(customer_number: str, business_number: str, phone_number_id: str, message: str) -> str:
+    config = get_agent_config(phone_number_id)
     system_prompt = build_system_prompt(config)
 
     history = load_chat_history(business_number, customer_number)
@@ -167,44 +197,70 @@ def get_ai_response(customer_number: str, business_number: str, message: str) ->
     return response.content
 
 # ─────────────────────────────────────────
-# WhatsApp webhook
+# Webhook Receiver (POST)
+# Meta sends messages here
 # ─────────────────────────────────────────
 @router.post("/message")
-async def whatsapp_message(request: Request):
-    form_data = await request.form()
-
-    incoming_message = form_data.get("Body", "").strip()
-    customer_number  = form_data.get("From", "")
-    business_number  = form_data.get("To", "")
-
-    print(f"📩 Message : {incoming_message}")
-    print(f"👤 From    : {customer_number}")
-    print(f"🏥 To      : {business_number}")
-
-    if not incoming_message:
-        return Response(content="", media_type="text/plain")
-
+async def receive_message(request: Request):
     try:
-        # Step 1 — Save user message FIRST
-        save_message(business_number, customer_number, "user", incoming_message)
+        body = await request.json()
+        print(f"📩 Meta webhook received: {json.dumps(body, indent=2)}")
 
-        # Step 2 — Get AI reply
-        ai_reply = get_ai_response(customer_number, business_number, incoming_message)
+        # Extract message data
+        entry    = body.get("entry", [])[0]
+        changes  = entry.get("changes", [])[0]
+        value    = changes.get("value", {})
+
+        phone_number_id = value.get("metadata", {}).get("phone_number_id", "")
+        business_number = value.get("metadata", {}).get("display_phone_number", "")
+
+        messages = value.get("messages", [])
+
+        if not messages:
+            print("ℹ️ No messages in webhook (status update)")
+            return {"status": "ok"}
+
+        msg             = messages[0]
+        customer_number = msg.get("from", "")
+        msg_type        = msg.get("type", "")
+
+        # Only handle text messages
+        if msg_type != "text":
+            print(f"ℹ️ Ignoring non-text message type: {msg_type}")
+            return {"status": "ok"}
+
+        incoming_text = msg.get("text", {}).get("body", "").strip()
+
+        print(f"📩 Message      : {incoming_text}")
+        print(f"👤 From         : {customer_number}")
+        print(f"🏥 Business     : {business_number}")
+        print(f"📱 Phone ID     : {phone_number_id}")
+
+        if not incoming_text:
+            return {"status": "ok"}
+
+        # Get access token — use permanent token from config or env
+        config = get_agent_config(phone_number_id)
+        access_token = META_ACCESS_TOKEN
+        if config and config.get("access_token"):
+            access_token = config.get("access_token")
+
+        # Save user message
+        save_message(business_number, customer_number, "user", incoming_text)
+
+        # Get AI reply
+        ai_reply = get_ai_response(customer_number, business_number, phone_number_id, incoming_text)
         print(f"🤖 AI Reply: {ai_reply}")
 
-        # Step 3 — Save assistant reply AFTER
+        # Save AI reply
         save_message(business_number, customer_number, "assistant", ai_reply)
 
-        # Step 4 — Send reply to customer
-        twilio_client.messages.create(
-            body=ai_reply,
-            from_=business_number,
-            to=customer_number
-        )
+        # Send reply to customer
+        await send_meta_message(phone_number_id, customer_number, ai_reply, access_token)
 
-        print("✅ Message sent!")
+        print("✅ Reply sent!")
 
     except Exception as e:
         print(f"❌ Error: {e}")
 
-    return Response(content="", media_type="text/plain")
+    return {"status": "ok"}

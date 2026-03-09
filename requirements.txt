@@ -7,3 +7,4 @@ twilio
 pydantic
 supabase
 python-multipart
+httpx
