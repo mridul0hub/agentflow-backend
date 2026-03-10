@@ -194,7 +194,9 @@ async def receive_email(request: Request):
         body = await request.json()
         print(f"📩 Email received: {body}")
 
-        # Extract email data
+        # Handle both list and dict from Zapier
+        if isinstance(body, list):
+            body = body[0]
         customer_email  = body.get("From", "")
         business_email  = body.get("To", "")
         subject         = body.get("Subject", "No Subject")
