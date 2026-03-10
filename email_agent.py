@@ -164,7 +164,7 @@ def get_ai_response(customer_email: str, business_email: str, subject: str, mess
 def send_email(to: str, subject: str, reply: str, from_name: str):
     try:
         params = {
-            "from": f"{from_name} <onboarding@resend.dev>",
+            "from": f"{from_name} AI Assistant <onboarding@resend.dev>",
             "to": [to],
             "subject": f"Re: {subject}",
             "html": f"""
