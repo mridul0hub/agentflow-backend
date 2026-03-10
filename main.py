@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from chat import router as chat_router
 from whatsapp import router as whatsapp_router
 from meta_whatsapp import router as meta_router
+from email_agent import router as email_router
 
 app = FastAPI()
 
@@ -22,6 +23,7 @@ app.add_middleware(
 app.include_router(chat_router, prefix="/chat")
 app.include_router(whatsapp_router, prefix="/whatsapp")
 app.include_router(meta_router, prefix="/meta")
+app.include_router(email_router, prefix="/email")
 
 @app.get("/")
 async def root():
