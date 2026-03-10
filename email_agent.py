@@ -216,6 +216,10 @@ async def receive_email(request: Request):
         # Save customer email
         save_email(business_email, customer_email, "user", subject, text_body)
 
+        # Small wait to ensure save completes before AI reads history
+        import time
+        time.sleep(0.5)
+
         # Get AI reply
         ai_reply = get_ai_response(customer_email, business_email, subject, text_body)
         print(f"🤖 AI Reply: {ai_reply}")
