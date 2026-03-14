@@ -248,7 +248,7 @@ Rules:
                     "business_number": business_number,
                     "customer_number": customer_number,
                     "status": "completed",
-                    "duration_seconds": duration,
+                    "duration_seconds": int(float(duration)) if duration else 0,
                     "summary": summary,
                     "transcript": transcript,
                     "ended_reason": ended_reason,
