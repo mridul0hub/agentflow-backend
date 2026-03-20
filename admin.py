@@ -1,6 +1,7 @@
 import os
 from fastapi import APIRouter, Request, HTTPException
 from supabase import create_client
+from auth import send_agent_activated_email
 
 router = APIRouter()
 
@@ -30,13 +31,10 @@ async def get_all_users(admin_email: str):
 async def get_user_detail(user_id: str, admin_email: str):
     verify_admin(admin_email)
     try:
-        # Credits
         credits = supabase.table("credits").select("*").eq("user_id", user_id).single().execute()
-        # Agents
         wa = supabase.table("whatsapp_agents").select("*").eq("user_id", user_id).execute()
         em = supabase.table("email_agents").select("*").eq("user_id", user_id).execute()
         vo = supabase.table("voice_agents").select("*").eq("user_id", user_id).execute()
-        # Recent transactions
         tx = supabase.table("credit_transactions").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(20).execute()
         return {
             "credits": credits.data,
@@ -52,11 +50,11 @@ async def get_user_detail(user_id: str, admin_email: str):
 @router.post("/toggle-agent")
 async def toggle_agent(request: Request):
     try:
-        body = await request.json()
+        body        = await request.json()
         admin_email = body.get("admin_email")
         user_id     = body.get("user_id")
-        agent_type  = body.get("agent_type")  # whatsapp / email / voice
-        is_active   = body.get("is_active")   # True / False
+        agent_type  = body.get("agent_type")
+        is_active   = body.get("is_active")
 
         verify_admin(admin_email)
 
@@ -71,6 +69,20 @@ async def toggle_agent(request: Request):
 
         supabase.table(table).update({"is_active": is_active}).eq("user_id", user_id).execute()
         print(f"✅ {agent_type} agent {'activated' if is_active else 'deactivated'} for {user_id}")
+
+        # Send activation email to user
+        if is_active:
+            try:
+                user = supabase.auth.admin.get_user_by_id(user_id)
+                if user.user:
+                    email = user.user.email
+                    name = user.user.user_metadata.get("full_name", "") if user.user.user_metadata else ""
+                    agent_data = supabase.table(table).select("business_name").eq("user_id", user_id).single().execute()
+                    business_name = agent_data.data.get("business_name", "Your Business") if agent_data.data else "Your Business"
+                    send_agent_activated_email(email, name, agent_type, business_name)
+            except Exception as email_err:
+                print(f"⚠️ Could not send activation email: {email_err}")
+
         return {"status": "ok", "is_active": is_active}
 
     except HTTPException as e:
@@ -82,25 +94,22 @@ async def toggle_agent(request: Request):
 @router.post("/credits")
 async def manage_credits(request: Request):
     try:
-        body = await request.json()
+        body        = await request.json()
         admin_email = body.get("admin_email")
         user_id     = body.get("user_id")
-        amount      = body.get("amount", 0)   # positive = add, negative = remove
+        amount      = body.get("amount", 0)
         note        = body.get("note", "Admin adjustment")
 
         verify_admin(admin_email)
 
-        # Get current balance
         result = supabase.table("credits").select("*").eq("user_id", user_id).single().execute()
         if not result.data:
-            # Create credits row if missing
             supabase.table("credits").insert({"user_id": user_id, "balance": max(0, amount), "total_used": 0}).execute()
         else:
             current = result.data.get("balance", 0)
             new_balance = max(0, current + amount)
             supabase.table("credits").update({"balance": new_balance}).eq("user_id", user_id).execute()
 
-        # Log transaction
         supabase.table("credit_transactions").insert({
             "user_id": user_id,
             "amount": amount,
@@ -127,7 +136,6 @@ async def get_stats(admin_email: str):
         wa_active = supabase.table("whatsapp_agents").select("*", count="exact", head=True).eq("is_active", True).execute()
         em_active = supabase.table("email_agents").select("*", count="exact", head=True).eq("is_active", True).execute()
         vo_active = supabase.table("voice_agents").select("*", count="exact", head=True).eq("is_active", True).execute()
-
         return {
             "total_users": len(users.data),
             "total_replies": total_tx.count or 0,

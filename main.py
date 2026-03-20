@@ -7,6 +7,7 @@ from email_agent import router as email_router
 from voice_agent import router as voice_router
 from credits import router as credits_router
 from admin import router as admin_router
+from auth import router as auth_router
 
 app = FastAPI()
 
@@ -30,6 +31,7 @@ app.include_router(email_router, prefix="/email")
 app.include_router(voice_router, prefix="/voice")
 app.include_router(credits_router, prefix="/credits")
 app.include_router(admin_router, prefix="/admin")
+app.include_router(auth_router, prefix="/auth")
 
 @app.get("/")
 async def root():
