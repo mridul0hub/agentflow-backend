@@ -1,59 +1,49 @@
 import os
+import time
 import resend
 from dotenv import load_dotenv
 from fastapi import APIRouter, Request
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from supabase import create_client
+from credits import deduct_credit, has_credits, get_user_id_from_email
 
 load_dotenv(dotenv_path="D:/AI_Agent_SaaS/.env")
 
 router = APIRouter()
 
-# Resend
 resend.api_key = os.getenv("RESEND_API_KEY")
 
-# Gemini AI
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     temperature=0.3,
     google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
-# Supabase
 supabase = create_client(
     os.getenv("SUPABASE_URL"),
     os.getenv("SUPABASE_SERVICE_KEY")
 )
 
-# ─────────────────────────────────────────
-# Fetch agent config from Supabase
-# ─────────────────────────────────────────
 def get_agent_config(business_email: str):
     try:
         print(f"🔍 Looking up email agent for: {business_email}")
-
         result = supabase.table("email_agents") \
             .select("*") \
             .eq("business_email", business_email) \
             .eq("is_active", True) \
             .single() \
             .execute()
-
         if result.data:
             print(f"✅ Config found: {result.data['business_name']}")
             return result.data
         else:
             print(f"⚠️ No active email agent for: {business_email}")
             return None
-
     except Exception as e:
         print(f"❌ Supabase config error: {e}")
         return None
 
-# ─────────────────────────────────────────
-# Build system prompt
-# ─────────────────────────────────────────
 def build_system_prompt(config: dict) -> str:
     if not config:
         return """
@@ -96,9 +86,6 @@ INSTRUCTIONS:
 """
     return prompt
 
-# ─────────────────────────────────────────
-# Save email to Supabase
-# ─────────────────────────────────────────
 def save_email(business_email: str, customer_email: str, role: str, subject: str, message: str):
     try:
         supabase.table("email_history").insert({
@@ -112,9 +99,6 @@ def save_email(business_email: str, customer_email: str, role: str, subject: str
     except Exception as e:
         print(f"❌ Save email error: {e}")
 
-# ─────────────────────────────────────────
-# Load email history from Supabase
-# ─────────────────────────────────────────
 def load_email_history(business_email: str, customer_email: str) -> list:
     try:
         result = supabase.table("email_history") \
@@ -124,7 +108,6 @@ def load_email_history(business_email: str, customer_email: str) -> list:
             .order("created_at", desc=False) \
             .limit(10) \
             .execute()
-
         messages = []
         if result.data:
             for row in result.data:
@@ -132,35 +115,23 @@ def load_email_history(business_email: str, customer_email: str) -> list:
                     messages.append(HumanMessage(content=row["message"]))
                 elif row["role"] == "assistant":
                     messages.append(AIMessage(content=row["message"]))
-
         print(f"📖 Loaded {len(messages)} emails from history")
         return messages
-
     except Exception as e:
         print(f"❌ Load history error: {e}")
         return []
 
-# ─────────────────────────────────────────
-# Get AI response
-# ─────────────────────────────────────────
 def get_ai_response(customer_email: str, business_email: str, subject: str, message: str) -> str:
     config = get_agent_config(business_email)
     system_prompt = build_system_prompt(config)
-
     history = load_email_history(business_email, customer_email)
-
     full_message = f"Subject: {subject}\n\n{message}"
-
     messages = [SystemMessage(content=system_prompt)]
     messages.extend(history)
     messages.append(HumanMessage(content=full_message))
-
     response = llm.invoke(messages)
     return response.content
 
-# ─────────────────────────────────────────
-# Send email via Resend
-# ─────────────────────────────────────────
 def send_email(to: str, subject: str, reply: str, from_name: str):
     try:
         params = {
@@ -172,7 +143,7 @@ def send_email(to: str, subject: str, reply: str, from_name: str):
                     <p>{reply.replace(chr(10), '<br>')}</p>
                     <hr style="border: 1px solid #eee; margin: 20px 0;">
                     <p style="color: #999; font-size: 12px;">
-                        This is an automated response powered by Vasu Agents AI.
+                        This is an automated response powered by AEZIO AI Agents.
                     </p>
                 </div>
             """
@@ -184,23 +155,19 @@ def send_email(to: str, subject: str, reply: str, from_name: str):
         print(f"❌ Send email error: {e}")
         return None
 
-# ─────────────────────────────────────────
-# Receive email webhook (POST)
-# Resend calls this when email is received
-# ─────────────────────────────────────────
 @router.post("/receive")
 async def receive_email(request: Request):
     try:
         body = await request.json()
         print(f"📩 Email received: {body}")
 
-        # Handle both list and dict from Zapier
         if isinstance(body, list):
             body = body[0]
-        customer_email  = body.get("From", "")
-        business_email  = body.get("To", "")
-        subject         = body.get("Subject", "No Subject")
-        text_body       = body.get("TextBody", "") or body.get("HtmlBody", "")
+
+        customer_email = body.get("From", "")
+        business_email = body.get("To", "")
+        subject        = body.get("Subject", "No Subject")
+        text_body      = body.get("TextBody", "") or body.get("HtmlBody", "")
 
         print(f"📩 From    : {customer_email}")
         print(f"🏥 To      : {business_email}")
@@ -209,15 +176,18 @@ async def receive_email(request: Request):
         if not text_body:
             return {"status": "ok"}
 
-        # Get agent config
+        # ── CREDIT CHECK ──────────────────────────────
+        user_id = get_user_id_from_email(business_email)
+
+        if user_id and not has_credits(user_id):
+            print(f"❌ No credits for user {user_id} — not replying")
+            return {"status": "ok"}
+
         config = get_agent_config(business_email)
         business_name = config.get("business_name", "Business") if config else "Business"
 
         # Save customer email
         save_email(business_email, customer_email, "user", subject, text_body)
-
-        # Small wait to ensure save completes before AI reads history
-        import time
         time.sleep(0.5)
 
         # Get AI reply
@@ -227,9 +197,16 @@ async def receive_email(request: Request):
         # Save AI reply
         save_email(business_email, customer_email, "assistant", f"Re: {subject}", ai_reply)
 
+        # Deduct 1 credit
+        if user_id:
+            deduct_credit(
+                user_id=user_id,
+                agent_type="email",
+                description=f"Email reply to {customer_email}"
+            )
+
         # Send reply
         send_email(customer_email, subject, ai_reply, business_name)
-
         print("✅ Email reply sent!")
 
     except Exception as e:
@@ -237,9 +214,6 @@ async def receive_email(request: Request):
 
     return {"status": "ok"}
 
-# ─────────────────────────────────────────
-# Manual trigger — test endpoint
-# ─────────────────────────────────────────
 @router.post("/test")
 async def test_email(request: Request):
     try:
@@ -247,12 +221,9 @@ async def test_email(request: Request):
         to      = body.get("to", "")
         subject = body.get("subject", "Test Email")
         message = body.get("message", "Hello!")
-
         if not to:
             return {"error": "Please provide 'to' email"}
-
-        send_email(to, subject, message, "Vasu Agents")
+        send_email(to, subject, message, "AEZIO AI Agents")
         return {"status": "ok", "message": f"Test email sent to {to}"}
-
     except Exception as e:
         return {"error": str(e)}

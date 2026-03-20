@@ -5,59 +5,48 @@ from twilio.rest import Client
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from supabase import create_client
+from credits import deduct_credit, has_credits, get_user_id_from_whatsapp
 
 load_dotenv(dotenv_path="D:/AI_Agent_SaaS/.env")
 
 router = APIRouter()
 
-# Twilio
 twilio_client = Client(
     os.getenv("TWILIO_ACCOUNT_SID"),
     os.getenv("TWILIO_AUTH_TOKEN")
 )
 
-# Gemini AI
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     temperature=0.3,
     google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
-# Supabase
 supabase = create_client(
     os.getenv("SUPABASE_URL"),
     os.getenv("SUPABASE_SERVICE_KEY")
 )
 
-# ─────────────────────────────────────────
-# Fetch agent config from Supabase
-# ─────────────────────────────────────────
 def get_agent_config(whatsapp_number: str):
     try:
         clean_number = whatsapp_number.replace("whatsapp:", "").strip()
         print(f"🔍 Looking up config for: {clean_number}")
-
         result = supabase.table("whatsapp_agents") \
             .select("*") \
             .eq("whatsapp_number", clean_number) \
             .eq("is_active", True) \
             .single() \
             .execute()
-
         if result.data:
             print(f"✅ Config found: {result.data['business_name']}")
             return result.data
         else:
             print(f"⚠️ No active agent for: {clean_number}")
             return None
-
     except Exception as e:
         print(f"❌ Supabase config error: {e}")
         return None
 
-# ─────────────────────────────────────────
-# Build system prompt
-# ─────────────────────────────────────────
 def build_system_prompt(config: dict) -> str:
     if not config:
         return """
@@ -99,34 +88,24 @@ INSTRUCTIONS:
 """
     return prompt
 
-# ─────────────────────────────────────────
-# Save message to Supabase
-# ─────────────────────────────────────────
 def save_message(business_number: str, customer_number: str, role: str, message: str):
     try:
         clean_business = business_number.replace("whatsapp:", "").strip()
         clean_customer = customer_number.replace("whatsapp:", "").strip()
-
         supabase.table("chat_history").insert({
             "business_number": clean_business,
             "customer_number": clean_customer,
             "role": role,
             "message": message
         }).execute()
-
         print(f"💾 Saved [{role}]: {message[:50]}")
-
     except Exception as e:
         print(f"❌ Save message error: {e}")
 
-# ─────────────────────────────────────────
-# Load chat history from Supabase
-# ─────────────────────────────────────────
 def load_chat_history(business_number: str, customer_number: str) -> list:
     try:
         clean_business = business_number.replace("whatsapp:", "").strip()
         clean_customer = customer_number.replace("whatsapp:", "").strip()
-
         result = supabase.table("chat_history") \
             .select("role, message") \
             .eq("business_number", clean_business) \
@@ -134,7 +113,6 @@ def load_chat_history(business_number: str, customer_number: str) -> list:
             .order("created_at", desc=False) \
             .limit(20) \
             .execute()
-
         messages = []
         if result.data:
             for row in result.data:
@@ -142,37 +120,25 @@ def load_chat_history(business_number: str, customer_number: str) -> list:
                     messages.append(HumanMessage(content=row["message"]))
                 elif row["role"] == "assistant":
                     messages.append(AIMessage(content=row["message"]))
-
         print(f"📖 Loaded {len(messages)} messages from history")
         return messages
-
     except Exception as e:
         print(f"❌ Load history error: {e}")
         return []
 
-# ─────────────────────────────────────────
-# Get AI response (NO saving here)
-# ─────────────────────────────────────────
 def get_ai_response(customer_number: str, business_number: str, message: str) -> str:
     config = get_agent_config(business_number)
     system_prompt = build_system_prompt(config)
-
     history = load_chat_history(business_number, customer_number)
-
     messages = [SystemMessage(content=system_prompt)]
     messages.extend(history)
     messages.append(HumanMessage(content=message))
-
     response = llm.invoke(messages)
     return response.content
 
-# ─────────────────────────────────────────
-# WhatsApp webhook
-# ─────────────────────────────────────────
 @router.post("/message")
 async def whatsapp_message(request: Request):
     form_data = await request.form()
-
     incoming_message = form_data.get("Body", "").strip()
     customer_number  = form_data.get("From", "")
     business_number  = form_data.get("To", "")
@@ -185,17 +151,34 @@ async def whatsapp_message(request: Request):
         return Response(content="", media_type="text/plain")
 
     try:
-        # Step 1 — Save user message FIRST
+        clean_number = business_number.replace("whatsapp:", "").strip()
+
+        # ── CREDIT CHECK ──────────────────────────────
+        user_id = get_user_id_from_whatsapp(clean_number)
+
+        if user_id and not has_credits(user_id):
+            print(f"❌ No credits for user {user_id} — not replying")
+            return Response(content="", media_type="text/plain")
+
+        # Step 1 — Save user message
         save_message(business_number, customer_number, "user", incoming_message)
 
         # Step 2 — Get AI reply
         ai_reply = get_ai_response(customer_number, business_number, incoming_message)
         print(f"🤖 AI Reply: {ai_reply}")
 
-        # Step 3 — Save assistant reply AFTER
+        # Step 3 — Save assistant reply
         save_message(business_number, customer_number, "assistant", ai_reply)
 
-        # Step 4 — Send reply to customer
+        # Step 4 — Deduct 1 credit
+        if user_id:
+            deduct_credit(
+                user_id=user_id,
+                agent_type="whatsapp",
+                description=f"WhatsApp reply to {customer_number}"
+            )
+
+        # Step 5 — Send reply
         twilio_client.messages.create(
             body=ai_reply,
             from_=business_number,

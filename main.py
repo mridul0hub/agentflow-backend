@@ -5,6 +5,8 @@ from whatsapp import router as whatsapp_router
 from meta_whatsapp import router as meta_router
 from email_agent import router as email_router
 from voice_agent import router as voice_router
+from credits import router as credits_router
+from admin import router as admin_router
 
 app = FastAPI()
 
@@ -26,7 +28,9 @@ app.include_router(whatsapp_router, prefix="/whatsapp")
 app.include_router(meta_router, prefix="/meta")
 app.include_router(email_router, prefix="/email")
 app.include_router(voice_router, prefix="/voice")
+app.include_router(credits_router, prefix="/credits")
+app.include_router(admin_router, prefix="/admin")
 
 @app.get("/")
 async def root():
-    return {"status": "Soni AI Agents Backend Running!"}
+    return {"status": "AEZIO AI Agents Backend Running!"}
