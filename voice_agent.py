@@ -15,7 +15,7 @@ RETELL_API_KEY = os.getenv("RETELL_API_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash",
+    model="gemini-2.5-flash",
     temperature=0.3,
     google_api_key=os.getenv("GOOGLE_API_KEY")
 )
