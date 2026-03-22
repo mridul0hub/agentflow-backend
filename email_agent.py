@@ -136,7 +136,7 @@ def send_email(to: str, subject: str, reply: str, from_name: str):
     try:
         params = {
             "from": f"{from_name} AI Assistant <onboarding@resend.dev>",
-            "to": [to],
+            "to": ["diptisoni139@gmail.com"],
             "subject": f"Re: {subject}",
             "html": f"""
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">

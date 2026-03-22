@@ -19,7 +19,6 @@ llm = ChatGoogleGenerativeAI(
     google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
-# ─── Get voice agent config ───────────────────────────────────────────────────
 def get_voice_agent(phone_number: str):
     try:
         result = supabase.table("voice_agents") \
@@ -32,12 +31,11 @@ def get_voice_agent(phone_number: str):
     except:
         return None
 
-# ─── Build human-like system prompt ──────────────────────────────────────────
 def build_system_prompt(config: dict) -> str:
     if not config:
         return """
-You are Priya, a warm professional receptionist at a clinic.
-Speak naturally like a real human — short replies, 1-2 sentences max.
+You are Priya, a warm professional receptionist.
+Speak naturally like a real human. Keep replies 1-2 sentences max.
 Never repeat your greeting. Be warm and friendly.
 """
     prompt = f"""
@@ -45,18 +43,12 @@ You are Priya, a warm and professional receptionist for {config.get('business_na
 You are on a PHONE CALL — speak exactly like a real human receptionist.
 
 PERSONALITY:
-- Warm, friendly, professional — like a real receptionist
+- Warm, friendly, professional
 - Natural conversational flow — not robotic
-- Patient and understanding
 - Use "ji", "bilkul", "zaroor", "achha" naturally in Hindi
-
-STRICT RULES:
-- Keep EVERY reply to 1-2 short sentences MAXIMUM
+- Keep every reply to 1-2 short sentences MAXIMUM
 - NEVER repeat greeting after the first message
-- Do NOT repeat business name in every reply
-- If caller speaks Hindi — reply in Hindi
-- If caller speaks English — reply in English
-- Match caller's language style (Hinglish is fine)
+- Match caller's language — Hindi, English, or Hinglish
 
 BUSINESS INFORMATION:
 Business: {config.get('business_name', 'N/A')}
@@ -74,38 +66,32 @@ Business: {config.get('business_name', 'N/A')}
 
     prompt += """
 APPOINTMENT BOOKING:
-1. Ask name — confirm it: "Rahul ji, sahi hai?"
+1. Ask name — confirm it clearly
 2. Ask date
 3. Ask time
-4. Ask purpose/reason for visit (optional — "Koi specific problem hai?")
-5. Confirm all details together
-6. Call book_appointment function
+4. Ask reason for visit (optional)
+5. Confirm all details — then call book_appointment function
 
 NAME HANDLING:
-- If name unclear — "Sorry ji, naam dobara bata sakte hain?"
-- Always confirm name before booking
+- If name unclear — ask to spell: "Naam spell kar sakte hain?"
+- Always confirm before booking
 
-SCAM DETECTION:
-- Suspicious/abusive caller — call flag_scam_call function
-
-NATURAL RESPONSES:
-- "Haan ji, batayein?" (instead of repeating greeting)
-- "Bilkul, zaroor!" (instead of "I understand")
-- "Aapka naam?" (instead of "Could you please provide your name?")
+IMPORTANT:
+- Answer ALL questions using ONLY the business information provided above
+- If information not available — say "Clinic mein aake pata kar sakte hain"
+- NEVER make up information not provided
 """
     return prompt
 
-# ─── Save appointment ─────────────────────────────────────────────────────────
 def save_appointment(data: dict):
     try:
         supabase.table("appointments").insert(data).execute()
-        print(f"✅ Appointment saved: {data.get('customer_name')} - {data.get('appointment_date')}")
+        print(f"✅ Appointment: {data.get('customer_name')} - {data.get('appointment_date')}")
         return True
     except Exception as e:
-        print(f"❌ Appointment save error: {e}")
+        print(f"❌ Appointment error: {e}")
         return False
 
-# ─── WhatsApp alert ───────────────────────────────────────────────────────────
 async def alert_client_whatsapp(client_number: str, message: str):
     try:
         TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
@@ -120,15 +106,12 @@ async def alert_client_whatsapp(client_number: str, message: str):
                     "Body": message
                 }
             )
-        print(f"✅ WhatsApp alert sent to {client_number}")
+        print(f"✅ WhatsApp alert: {client_number}")
     except Exception as e:
-        print(f"❌ WhatsApp alert error: {e}")
+        print(f"❌ WhatsApp error: {e}")
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-# ENDPOINT 1 — CUSTOM LLM
-# Retell Agent → LLM → Custom LLM URL → .../voice/llm
-# ════════════════════════════════════════════════════════════════════════════════
+# ── CUSTOM LLM — Retell Agent → LLM → Custom LLM URL ─────────────────────────
 @router.post("/llm")
 async def retell_llm(request: Request):
     try:
@@ -172,10 +155,7 @@ async def retell_llm(request: Request):
         }
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-# ENDPOINT 2 — EVENT WEBHOOK
-# Retell Agent → General → Event Webhook URL → .../voice/webhook
-# ════════════════════════════════════════════════════════════════════════════════
+# ── EVENT WEBHOOK — Retell Agent → General → Event Webhook URL ───────────────
 @router.post("/webhook")
 async def retell_events(request: Request):
     try:
@@ -247,9 +227,8 @@ async def retell_events(request: Request):
                     "sentiment": analysis.get("user_sentiment", ""),
                     "call_intent": analysis.get("call_intent", "")
                 }).eq("call_id", call_id).execute()
-                print(f"✅ Call analyzed: {call_id}")
             except Exception as e:
-                print(f"❌ Call analyze error: {e}")
+                print(f"❌ Analyze error: {e}")
 
         return {"status": "ok"}
 
@@ -258,74 +237,77 @@ async def retell_events(request: Request):
         return {"status": "error"}
 
 
-# ── Book appointment ──────────────────────────────────────────────────────────
+# ── BOOK APPOINTMENT ──────────────────────────────────────────────────────────
 @router.post("/book-appointment")
 async def book_appointment_endpoint(request: Request):
     try:
         body = await request.json()
-        print(f"📅 Booking: {body}")
+        print(f"📅 Raw booking: {body}")
+
+        # Retell sends data nested under "args" key
+        # Handle both formats: direct fields OR nested under "args"
+        if "args" in body:
+            args = body["args"]
+        else:
+            args = body
 
         call_info = body.get("call", {})
-        customer_number = body.get("customer_number") or call_info.get("from_number", "")
-        business_number = body.get("business_number") or call_info.get("to_number", "")
+        customer_number = args.get("customer_number") or call_info.get("from_number", "")
+        business_number = args.get("business_number") or call_info.get("to_number", "")
+
         agent = get_voice_agent(business_number)
 
-        # Build extra_info from any additional fields
-        extra_info = {}
-        known_fields = {"customer_name", "customer_number", "business_number",
-                       "appointment_date", "appointment_time", "notes",
-                       "purpose", "call", "execution_message"}
-        for key, val in body.items():
-            if key not in known_fields and val:
-                extra_info[key] = val
+        # Any extra fields go into extra_info
+        known = {"customer_name", "customer_number", "business_number",
+                 "appointment_date", "appointment_time", "notes",
+                 "purpose", "customer_email", "execution_message"}
+        extra_info = {k: v for k, v in args.items() if k not in known and v}
 
         appointment_data = {
             "user_id": agent.get("user_id") if agent else None,
             "agent_type": "voice",
             "business_number": business_number,
             "customer_number": customer_number,
-            "customer_name": body.get("customer_name", "Unknown"),
-            "appointment_date": body.get("appointment_date", ""),
-            "appointment_time": body.get("appointment_time", ""),
-            "purpose": body.get("purpose", body.get("notes", "")),
+            "customer_name": args.get("customer_name", "Unknown"),
+            "customer_email": args.get("customer_email", ""),
+            "appointment_date": args.get("appointment_date", ""),
+            "appointment_time": args.get("appointment_time", ""),
+            "purpose": args.get("purpose") or args.get("notes", ""),
+            "notes": args.get("notes", ""),
             "extra_info": extra_info,
-            "notes": body.get("notes", ""),
             "status": "pending",
         }
         success = save_appointment(appointment_data)
 
         if agent and agent.get("client_whatsapp"):
-            extra_str = ""
-            if extra_info:
-                extra_str = "\n" + "\n".join([f"• {k}: {v}" for k, v in extra_info.items()])
             msg = (
                 f"📅 *New Appointment — Voice Agent!*\n"
-                f"👤 Name: {body.get('customer_name', 'Unknown')}\n"
-                f"📞 Phone: {customer_number}\n"
-                f"📅 Date: {body.get('appointment_date', '—')}\n"
-                f"⏰ Time: {body.get('appointment_time', '—')}\n"
-                f"🎯 Purpose: {body.get('purpose', body.get('notes', '—'))}"
-                f"{extra_str}"
+                f"👤 Name: {appointment_data['customer_name']}\n"
+                f"📞 Phone: {customer_number or '—'}\n"
+                f"📅 Date: {appointment_data['appointment_date']}\n"
+                f"⏰ Time: {appointment_data['appointment_time']}\n"
+                f"🎯 Purpose: {appointment_data['purpose'] or '—'}"
             )
             await alert_client_whatsapp(agent["client_whatsapp"], msg)
 
         return {"result": "Appointment booked successfully!" if success else "Booking failed."}
 
     except Exception as e:
-        print(f"❌ Book appointment error: {e}")
+        print(f"❌ Booking error: {e}")
         return {"result": "Error booking appointment."}
 
 
-# ── Flag scam ─────────────────────────────────────────────────────────────────
+# ── FLAG SCAM ─────────────────────────────────────────────────────────────────
 @router.post("/flag-scam")
 async def flag_scam_endpoint(request: Request):
     try:
         body = await request.json()
+        args = body.get("args", body)
         call_info = body.get("call", {})
-        customer_number = body.get("customer_number") or call_info.get("from_number", "")
-        business_number = body.get("business_number") or call_info.get("to_number", "")
-        reason = body.get("reason", "Suspicious behavior")
-        call_id = body.get("call_id", "")
+        customer_number = args.get("customer_number") or call_info.get("from_number", "")
+        business_number = args.get("business_number") or call_info.get("to_number", "")
+        reason = args.get("reason", "Suspicious behavior")
+        call_id = args.get("call_id") or call_info.get("call_id", "")
         agent = get_voice_agent(business_number)
 
         if call_id:
@@ -345,7 +327,7 @@ async def flag_scam_endpoint(request: Request):
         return {"result": f"Error: {str(e)}"}
 
 
-# ── Get call logs ─────────────────────────────────────────────────────────────
+# ── GET CALL LOGS ─────────────────────────────────────────────────────────────
 @router.get("/calls/{user_id}")
 async def get_call_logs(user_id: str):
     try:
