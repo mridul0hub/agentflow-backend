@@ -14,20 +14,17 @@ load_dotenv(dotenv_path="D:/AI_Agent_SaaS/.env")
 
 router = APIRouter()
 
-# Gemini AI
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
+    model="gemini-2.0-flash",
     temperature=0.3,
     google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
-# Supabase
 supabase = create_client(
     os.getenv("SUPABASE_URL"),
     os.getenv("SUPABASE_SERVICE_KEY")
 )
 
-# Gmail SMTP config
 GMAIL_USER = os.getenv("GMAIL_USER")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 
@@ -44,9 +41,8 @@ def get_agent_config(business_email: str):
         if result.data:
             print(f"✅ Config found: {result.data['business_name']}")
             return result.data
-        else:
-            print(f"⚠️ No active email agent for: {business_email}")
-            return None
+        print(f"⚠️ No active email agent for: {business_email}")
+        return None
     except Exception as e:
         print(f"❌ Supabase config error: {e}")
         return None
@@ -56,13 +52,12 @@ def build_system_prompt(config: dict) -> str:
     if not config:
         return """
 You are a helpful business email assistant.
-Reply professionally and clearly. Keep replies concise — 3-4 sentences max.
+Reply professionally. Keep replies concise — 3-4 sentences max.
 Reply in the same language the customer uses.
 """
     prompt = f"""
 You are a professional email assistant for {config.get('business_name', 'this business')}.
-Reply in a professional, warm, and helpful tone.
-Keep replies concise — 3-4 sentences max.
+Reply in a professional, warm, and helpful tone. Keep replies concise — 3-4 sentences max.
 
 BUSINESS INFORMATION:
 Business Name: {config.get('business_name', 'N/A')}
@@ -138,6 +133,45 @@ def get_ai_response(customer_email: str, business_email: str, subject: str, mess
     response = llm.invoke(messages)
     return response.content
 
+# ─── Check if appointment related ────────────────────────────────────────────
+def is_appointment_email(text: str) -> bool:
+    keywords = [
+        "appointment", "book", "schedule", "visit", "consultation",
+        "अपॉइंटमेंट", "बुक", "मिलना", "date", "time", "slot",
+        "available", "timing", "when", "कब", "समय", "तारीख"
+    ]
+    text_lower = text.lower()
+    return any(word in text_lower for word in keywords)
+
+# ─── Save appointment from email ──────────────────────────────────────────────
+def save_appointment_from_email(business_email: str, customer_email: str, subject: str, user_id: str):
+    try:
+        existing = supabase.table("appointments") \
+            .select("id") \
+            .eq("customer_email", customer_email) \
+            .eq("business_number", business_email) \
+            .eq("status", "pending") \
+            .execute()
+        if existing.data:
+            return  # Already exists
+
+        customer_name = customer_email.split("@")[0].replace(".", " ").title()
+        supabase.table("appointments").insert({
+            "user_id": user_id,
+            "agent_type": "email",
+            "business_number": business_email,
+            "customer_number": "",
+            "customer_email": customer_email,
+            "customer_name": customer_name,
+            "purpose": subject,
+            "notes": "Appointment requested via email",
+            "extra_info": {},
+            "status": "pending"
+        }).execute()
+        print(f"✅ Appointment saved from email: {customer_email}")
+    except Exception as e:
+        print(f"❌ Appointment save error: {e}")
+
 # ─── Send email via Gmail SMTP ────────────────────────────────────────────────
 def send_email(to: str, subject: str, reply: str, from_name: str):
     try:
@@ -146,32 +180,26 @@ def send_email(to: str, subject: str, reply: str, from_name: str):
         msg["From"] = f"{from_name} <{GMAIL_USER}>"
         msg["To"] = to
 
-        # Plain text version
         text_part = MIMEText(reply, "plain", "utf-8")
-
-        # HTML version
         html_body = f"""
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
             <p style="font-size: 15px; line-height: 1.7;">{reply.replace(chr(10), '<br>')}</p>
             <hr style="border: 1px solid #eee; margin: 24px 0;">
             <p style="color: #999; font-size: 12px;">
-                This is an automated response powered by AEZIO AI Agents.
+                Powered by AEZIO AI Agents · aezioaiagents.vercel.app
             </p>
         </div>
         """
         html_part = MIMEText(html_body, "html", "utf-8")
-
         msg.attach(text_part)
         msg.attach(html_part)
 
-        # Send via Gmail SMTP
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
             server.sendmail(GMAIL_USER, to, msg.as_string())
 
         print(f"📤 Email sent to {to} via Gmail SMTP!")
         return True
-
     except Exception as e:
         print(f"❌ Gmail SMTP error: {e}")
         return False
@@ -198,10 +226,12 @@ async def receive_email(request: Request):
         if not text_body:
             return {"status": "ok"}
 
-        # Skip automated/noreply emails
-        skip_senders = ["no-reply", "noreply", "mailer-daemon", "postmaster", "do-not-reply"]
+        # Skip automated emails
+        skip_senders = ["no-reply", "noreply", "mailer-daemon",
+                        "postmaster", "do-not-reply", "donotreply",
+                        "notification", "automated", "support@"]
         if any(s in customer_email.lower() for s in skip_senders):
-            print(f"⏭️ Skipping automated email from: {customer_email}")
+            print(f"⏭️ Skipping automated email: {customer_email}")
             return {"status": "ok"}
 
         # Credit check
@@ -216,6 +246,10 @@ async def receive_email(request: Request):
         # Save customer email
         save_email(business_email, customer_email, "user", subject, text_body)
         time.sleep(0.5)
+
+        # Check if appointment related — save to appointments table
+        if is_appointment_email(text_body) and user_id:
+            save_appointment_from_email(business_email, customer_email, subject, user_id)
 
         # Get AI reply
         ai_reply = get_ai_response(customer_email, business_email, subject, text_body)
@@ -232,7 +266,7 @@ async def receive_email(request: Request):
                 description=f"Email reply to {customer_email}"
             )
 
-        # Send via Gmail SMTP
+        # Send reply
         send_email(customer_email, subject, ai_reply, business_name)
         print("✅ Email reply sent!")
 
@@ -247,11 +281,11 @@ async def test_email(request: Request):
     try:
         body = await request.json()
         to      = body.get("to", "")
-        subject = body.get("subject", "Test Email")
+        subject = body.get("subject", "Test")
         message = body.get("message", "Hello!")
         if not to:
-            return {"error": "Please provide 'to' email"}
+            return {"error": "email required"}
         success = send_email(to, subject, message, "AEZIO AI Agents")
-        return {"status": "ok" if success else "error", "message": f"Test email sent to {to}"}
+        return {"status": "ok" if success else "error"}
     except Exception as e:
         return {"error": str(e)}
